@@ -1,3 +1,43 @@
+FROM maven:3-adoptopenjdk-8 as envoybuilder
+
+ENV JAVA_VERSION=''
+
+RUN apt update \
+    && apt -y install \
+      wget software-properties-common make cmake python python-pip pkg-config \
+      zlib1g-dev bash-completion bc libtool automake zip time g++-6 gcc-6 \
+      clang-7 clang-format-7 rsync ninja-build unzip
+
+RUN wget https://github.com/bazelbuild/bazel/releases/download/0.22.0/bazel-0.22.0-dist.zip -O /tmp/bazel-0.22.0-dist.zip \
+  && unzip /tmp/bazel-0.22.0-dist.zip -d /tmp/bazel-0.22.0-dist \
+  && rm -rf /tmp/bazel-0.22.0-dist.zip
+
+WORKDIR /tmp/bazel-0.22.0-dist
+
+RUN EXTRA_BAZEL_ARGS='--host_javabase=@local_jdk//:jdk' ./compile.sh \
+ && cp /tmp/bazel-0.22.0-dist/output/bazel /usr/local/bin/
+
+WORKDIR /tmp/proxy
+
+RUN git clone --branch maistra-1.0.0 https://github.com/maistra/proxy.git . 
+
+RUN make build_envoy; sed -i 's/eile/mirror/' /root/.cache/bazel/_bazel_root/*/external/envoy/bazel/repository_locations.bzl \
+  && sed -i 's/eile/mirror/' /root/.cache/bazel/_bazel_root/*/external/envoy/bazel/repositories.bzl \
+  && bash -c "pushd /root/.cache/bazel/_bazel_root/*/external/; mv com_github_eile_tclap com_github_mirror_tclap; popd" \
+  && make build_envoy
+  # && mv /root/.cache/bazel/_bazel_root/*/external/com_github_eile_tclap/ /root/.cache/bazel/_bazel_root/*/external/com_github_mirror_tclap \
+  # && make build_envoy
+
+FROM golang:1.11 as builder
+
+RUN apt update; apt install -y git
+
+WORKDIR /go/src/istio.io/istio
+
+RUN git clone -b maistra-1.0.0 https://github.com/maistra/istio.git .
+
+RUN GOARCH=ppc64le bin/gobuild.sh  /go/out/linux_ppc64le/release/pilot-agent ./pilot/cmd/pilot-agent/
+
 FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 
 LABEL com.redhat.component="maistra-proxyv2-container"
@@ -20,14 +60,6 @@ ENV ISTIO_META_ISTIO_PROXY_SHA 102e286f1ff6a95195f2bb45a0cda78911884f0b
 # Environment variable indicating the exact build, for debugging
 ENV ISTIO_META_ISTIO_VERSION maistra-1.0.0
 
-RUN curl -Ls https://copr.fedorainfracloud.org/coprs/g/maistra/istio.el8/repo/rhelbeta-8/group_maistra-istio.el8-rhelbeta-8.repo -o /etc/yum.repos.d/maistra-istio-epel-8.repo
-
-RUN mv /etc/yum.repos.d/ubi.repo /ubi.repo
-
-RUN microdnf update -y && \
-    microdnf install -y istio-proxy-1.0.0 istio-pilot-agent-1.0.0 && \
-    microdnf clean all
-
 # pilot-agent and envoy may run with effective uid 0 in order to run envoy with
 # CAP_NET_ADMIN, so any iptables rule matching on "-m owner --uid-owner
 # istio-proxy" will not match connections from those processes anymore.
@@ -43,6 +75,8 @@ RUN microdnf update -y && \
 RUN mkdir -p /etc/istio/proxy && \
     chmod g+w /etc/istio/proxy
 
+COPY --from=builder /go/out/linux_ppc64le/release/pilot-agent /usr/local/bin/pilot-agent
+COPY --from=envoybuilder /tmp/proxy/bazel-bin/src/envoy/envoy /usr/local/bin/envoy
 ADD artifacts/envoy_pilot.yaml.tmpl /etc/istio/proxy/envoy_pilot.yaml.tmpl
 ADD artifacts/envoy_policy.yaml.tmpl /etc/istio/proxy/envoy_policy.yaml.tmpl
 ADD artifacts/envoy_telemetry.yaml.tmpl /etc/istio/proxy/envoy_telemetry.yaml.tmpl
@@ -50,6 +84,6 @@ ADD artifacts/istio-iptables.sh /usr/local/bin/istio-iptables.sh
 
 COPY artifacts/envoy_bootstrap_v2.json /var/lib/istio/envoy/envoy_bootstrap_tmpl.json
 COPY artifacts/envoy_bootstrap_drain.json /var/lib/istio/envoy/envoy_bootstrap_drain.json
+RUN chmod -R go+rX /var/lib/istio
 
-# The pilot-agent will bootstrap Envoy.
 ENTRYPOINT ["/usr/local/bin/pilot-agent"]

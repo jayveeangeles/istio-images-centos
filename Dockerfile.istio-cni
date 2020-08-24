@@ -1,4 +1,15 @@
-FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
+FROM golang:1.11 as builder
+
+RUN apt update; apt install -y git
+
+WORKDIR /go/src/istio.io/cni
+
+RUN git clone -b maistra-1.0.0 https://github.com/maistra/istio-cni.git .
+
+RUN GOOS=linux GOOARCH=ppc64le make build
+
+# FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
+FROM centos:8
 
 LABEL com.redhat.component="maistra-cni"
 LABEL name="maistra/istio-cni-ubi8"
@@ -13,17 +24,21 @@ LABEL maintainer="Istio Feedback <istio-feedback@redhat.com>"
 ENV container="oci"
 ENV ISTIO_VERSION=1.1.11
 
-
-RUN curl -Ls https://copr.fedorainfracloud.org/coprs/g/maistra/istio.el8/repo/rhelbeta-8/group_maistra-istio.el8-rhelbeta-8.repo -o /etc/yum.repos.d/openshift-istio-istio-epel-8.repo && \
-    microdnf update -y && \
-    microdnf install -y jq hostname istio-cni-1.0.0 && \
-    microdnf clean all
+RUN yum update -y && \
+    yum install hostname jq -y && \
+    yum clean all
 WORKDIR /tmp/
-
 
 ENV PATH=$PATH:/opt/cni/bin
 VOLUME /opt/cni
 WORKDIR /opt/cni/bin
+
+COPY --from=builder /go/out/linux_ppc64le/release/istio-cni /opt/cni/bin/istio-cni
+COPY --from=builder /go/src/istio.io/cni/tools/deb/istio-iptables.sh /opt/cni/bin/istio-iptables.sh
+COPY --from=builder /go/src/istio.io/cni/deployments/kubernetes/install/scripts/install-cni.sh /install-cni.sh
+COPY --from=builder /go/src/istio.io/cni/deployments/kubernetes/install/scripts/filter.jq /filter.jq
+COPY --from=maistra/istio-cni-ubi8:1.0.0 /istio-cni.conf.tmp /istio-cni.conf.tmp
+
 CMD ["/install-cni.sh"]
 
 ENTRYPOINT [ "/install-cni.sh"]

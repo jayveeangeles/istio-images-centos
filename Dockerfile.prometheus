@@ -1,3 +1,13 @@
+FROM golang:1.11 as builder
+
+RUN apt update; apt install -y git
+
+WORKDIR /go/src/github.com/prometheus/prometheus
+
+RUN git clone -b maistra-1.0 https://github.com/maistra/prometheus.git .
+
+RUN make build
+
 FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 
 LABEL com.redhat.component="maistra-prometheus-container"
@@ -13,17 +23,21 @@ LABEL maintainer="Istio Feedback <istio-feedback@redhat.com>"
 ENV container="oci"
 ENV ISTIO_VERSION=1.1.11
 
-RUN curl -Ls https://copr.fedorainfracloud.org/coprs/g/maistra/istio/repo/epel-7/group_maistra-prometheus-epel-7.repo -o /etc/yum.repos.d/openshift-istio-prometheus-epel-7.repo && \
-    microdnf update -y && \
-    microdnf install -y prometheus-2.7.2 && \
-    microdnf clean all
+ARG FROM_DIRECTORY=/go/src/github.com/prometheus/prometheus
+COPY --from=builder ${FROM_DIRECTORY}/prometheus                            /bin/prometheus
+COPY --from=builder ${FROM_DIRECTORY}/promtool                              /bin/promtool
+COPY --from=builder ${FROM_DIRECTORY}/documentation/examples/prometheus.yml /etc/prometheus/prometheus.yml
+COPY --from=builder ${FROM_DIRECTORY}/console_libraries/                    /usr/share/prometheus/console_libraries/
+COPY --from=builder ${FROM_DIRECTORY}/consoles/                             /usr/share/prometheus/consoles/
 
+RUN ln -s /usr/share/prometheus/console_libraries /usr/share/prometheus/consoles/ /etc/prometheus/
 RUN mkdir -p /prometheus && \
-    chgrp -R 0 /prometheus && \
-    chmod -R g=u /prometheus
+    chgrp -R 0 /etc/prometheus /prometheus && \
+    chmod -R g=u /etc/prometheus /prometheus
 
+# USER       nobody
 EXPOSE     9090
-WORKDIR /prometheus
+WORKDIR    /prometheus
 ENTRYPOINT [ "/bin/prometheus" ]
 CMD        [ "--config.file=/etc/prometheus/prometheus.yml", \
              "--storage.tsdb.path=/prometheus", \
